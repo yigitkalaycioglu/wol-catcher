@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace WolCatcher;
@@ -14,6 +15,9 @@ public static class PowerActions
     [DllImport("powrprof.dll", CharSet = CharSet.Auto, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetOEMCP();
 
     /// <summary>İşlemi uygular, başarılı olursa true döner.</summary>
     public static bool Execute(string action, bool force, ILogger logger)
@@ -53,7 +57,8 @@ public static class PowerActions
                 Arguments = args,
                 CreateNoWindow = true,
                 UseShellExecute = false,
-                RedirectStandardError = true
+                RedirectStandardError = true,
+                StandardErrorEncoding = OemEncoding()
             };
             using var proc = Process.Start(psi);
             if (proc is null)
@@ -76,6 +81,21 @@ public static class PowerActions
         {
             logger.LogError(ex, "shutdown.exe çalıştırılırken hata oluştu.");
             return false;
+        }
+    }
+
+    // shutdown.exe mesajlarını sistemin OEM kod sayfasıyla yazıyor (Türkçe Windows'ta 857).
+    // UTF-8 olarak okununca Türkçe karakterler logda bozuk görünüyordu.
+    private static Encoding OemEncoding()
+    {
+        try
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            return Encoding.GetEncoding((int)GetOEMCP());
+        }
+        catch
+        {
+            return Encoding.UTF8;
         }
     }
 }
