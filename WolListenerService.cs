@@ -16,10 +16,7 @@ public sealed class WolListenerService : BackgroundService
     private readonly WolCatcherOptions _options;
 
     private List<byte[]> _targetMacs = new();
-    private DateTime _startUtc;
-    private DateTime _lastActionUtc = DateTime.MinValue;
-    private readonly object _triggerLock = new();
-    private bool _triggered;
+    private TriggerGate _gate = null!;
 
     public WolListenerService(ILogger<WolListenerService> logger, IOptions<WolCatcherOptions> options)
     {
@@ -29,7 +26,10 @@ public sealed class WolListenerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _startUtc = DateTime.UtcNow;
+        _gate = new TriggerGate(
+            TimeSpan.FromSeconds(_options.StartupGraceSeconds),
+            TimeSpan.FromSeconds(_options.CooldownSeconds),
+            DateTime.UtcNow);
         _targetMacs = ResolveTargetMacs();
 
         if (_targetMacs.Count == 0)
@@ -113,31 +113,20 @@ public sealed class WolListenerService : BackgroundService
         if (!isOurs)
             return;
 
-        var now = DateTime.UtcNow;
-
-        // Başlangıç toleransı: WoL ile açılırken gelen tekrarlı paketlerin
-        // makineyi anında kapatmasını önler.
-        var sinceStart = now - _startUtc;
-        if (sinceStart.TotalSeconds < _options.StartupGraceSeconds)
+        var result = _gate.Evaluate(DateTime.UtcNow);
+        switch (result.Decision)
         {
-            _logger.LogInformation("Magic packet yakalandı ({Mac}) ancak başlangıç toleransı içinde ({Elapsed:F0}/{Grace}sn) — yok sayıldı.",
-                MagicPacket.Format(mac), sinceStart.TotalSeconds, _options.StartupGraceSeconds);
-            return;
+            case GateDecision.GracePeriod:
+                // WoL ile açılırken gelen tekrarlı paketlerin makineyi hemen kapatmasını önler.
+                _logger.LogInformation("Magic packet yakalandı ({Mac}) ama başlangıç toleransı içinde ({Elapsed:F0}/{Grace} sn), yok sayıldı.",
+                    MagicPacket.Format(mac), result.SinceGraceStart.TotalSeconds, _options.StartupGraceSeconds);
+                return;
+            case GateDecision.AlreadyRunning:
+            case GateDecision.Cooldown:
+                return;
         }
 
-        lock (_triggerLock)
-        {
-            if (_triggered)
-                return;
-
-            if ((now - _lastActionUtc).TotalSeconds < _options.CooldownSeconds)
-                return;
-
-            _lastActionUtc = now;
-            _triggered = true;
-        }
-
-        _logger.LogWarning("Hedef magic packet yakalandı (gönderen {Remote}, MAC {Mac}). '{Action}' işlemi {Delay}sn sonra uygulanacak.",
+        _logger.LogWarning("Hedef magic packet yakalandı (gönderen {Remote}, MAC {Mac}). '{Action}' işlemi {Delay} sn sonra uygulanacak.",
             remote, MagicPacket.Format(mac), _options.Action, _options.ActionDelaySeconds);
 
         // Alıcı döngüyü bloklamamak için işlemi ayrı bir görevde çalıştır.
@@ -147,12 +136,16 @@ public sealed class WolListenerService : BackgroundService
             {
                 if (_options.ActionDelaySeconds > 0)
                     await Task.Delay(TimeSpan.FromSeconds(_options.ActionDelaySeconds));
-                PowerActions.Execute(_options.Action, _options.Force, _logger);
+                if (!PowerActions.Execute(_options.Action, _options.Force, _logger))
+                    _logger.LogWarning("Güç işlemi başarısız oldu, sonraki paket yeniden değerlendirilecek.");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Güç işlemi uygulanırken hata oluştu.");
-                _triggered = false; // hata olduysa tekrar denenebilsin
+            }
+            finally
+            {
+                _gate.Complete();
             }
         });
     }

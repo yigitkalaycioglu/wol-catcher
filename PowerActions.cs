@@ -15,36 +15,35 @@ public static class PowerActions
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
 
-    public static void Execute(string action, bool force, ILogger logger)
+    /// <summary>İşlemi uygular, başarılı olursa true döner.</summary>
+    public static bool Execute(string action, bool force, ILogger logger)
     {
         switch (action?.Trim().ToLowerInvariant())
         {
             case "sleep":
                 logger.LogInformation("İşlem: Uyku moduna geçiliyor.");
                 // disableWakeEvent=false => WoL/uyandırma olayları aktif kalır.
-                if (!SetSuspendState(hibernate: false, forceCritical: false, disableWakeEvent: false))
-                    logger.LogError("SetSuspendState başarısız (Win32 hata kodu {Code}).", Marshal.GetLastWin32Error());
-                break;
+                if (SetSuspendState(hibernate: false, forceCritical: false, disableWakeEvent: false))
+                    return true;
+                logger.LogError("SetSuspendState başarısız (Win32 hata kodu {Code}).", Marshal.GetLastWin32Error());
+                return false;
 
             case "hibernate":
                 logger.LogInformation("İşlem: Hazırda bekletiliyor.");
-                if (!SetSuspendState(hibernate: true, forceCritical: false, disableWakeEvent: false))
-                {
-                    logger.LogWarning("SetSuspendState(hibernate) başarısız, shutdown.exe /h deneniyor.");
-                    RunShutdown("/h", logger);
-                }
-                break;
+                if (SetSuspendState(hibernate: true, forceCritical: false, disableWakeEvent: false))
+                    return true;
+                logger.LogWarning("SetSuspendState(hibernate) başarısız, shutdown.exe /h deneniyor.");
+                return RunShutdown("/h", logger);
 
             case "shutdown":
             default:
                 logger.LogInformation("İşlem: Bilgisayar kapatılıyor.");
                 // /s = kapat, /f = uygulamaları zorla kapat, /t 0 = beklemeden.
-                RunShutdown(force ? "/s /f /t 0" : "/s /t 0", logger);
-                break;
+                return RunShutdown(force ? "/s /f /t 0" : "/s /t 0", logger);
         }
     }
 
-    private static void RunShutdown(string args, ILogger logger)
+    private static bool RunShutdown(string args, ILogger logger)
     {
         try
         {
@@ -54,25 +53,29 @@ public static class PowerActions
                 Arguments = args,
                 CreateNoWindow = true,
                 UseShellExecute = false,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true
+                RedirectStandardError = true
             };
             using var proc = Process.Start(psi);
             if (proc is null)
             {
                 logger.LogError("shutdown.exe başlatılamadı.");
-                return;
+                return false;
             }
-            proc.WaitForExit(10_000);
-            if (proc.ExitCode != 0)
+            var stderr = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(10_000))
             {
-                var err = proc.StandardError.ReadToEnd();
-                logger.LogError("shutdown.exe çıkış kodu {Code}: {Err}", proc.ExitCode, err.Trim());
+                logger.LogError("shutdown.exe 10 sn içinde bitmedi.");
+                return false;
             }
+            if (proc.ExitCode == 0)
+                return true;
+            logger.LogError("shutdown.exe çıkış kodu {Code}: {Err}", proc.ExitCode, stderr.Result.Trim());
+            return false;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "shutdown.exe çalıştırılırken hata oluştu.");
+            return false;
         }
     }
 }
