@@ -10,9 +10,9 @@ C# ve .NET 10 ile yazıldı, .NET Generic Host üzerinde Windows servisi olarak 
 - Gelen paketin içinde magic packet arıyor: 6 bayt `FF` ve ardından 16 kez tekrarlanan MAC adresi. Arama paketin her yerinde yapılıyor, başta fazladan bayt ya da sonda SecureOn şifresi olsa da paket tanınıyor.
 - Paketteki MAC bu bilgisayara aitse ayarlanan işlemi yapıyor: kapatma (`shutdown.exe`), uyku ya da hazırda bekletme (`powrprof.dll` içindeki `SetSuspendState`, P/Invoke ile).
 - MAC adresleri ağ adaptörlerinden otomatik bulunuyor, istenirse `appsettings.json` içinde elle de verilebiliyor.
-- Bilgisayar WoL ile açıldığında telefon birkaç paket daha gönderiyor. Bu yüzden servis başladıktan sonraki 45 saniye boyunca gelen paketler yok sayılıyor. Kısa sürede birden fazla tetiklenmeyi de ayrı bir bekleme süresi engelliyor.
+- Bilgisayar WoL ile açıldığında ya da uykudan uyandığında telefon birkaç paket daha gönderiyor. Bu yüzden servis başladıktan ya da uyanma algılandıktan sonraki 45 saniye boyunca gelen paketler yok sayılıyor. Uyanma, servisin 5 saniyede bir yokladığı saatte büyük bir sıçrama görülmesinden anlaşılıyor. Kısa sürede birden fazla tetiklenmeyi de ayrı bir bekleme süresi engelliyor.
 - Aynı exe servisi kurup yönetebiliyor. `sc.exe` ile servis otomatik başlayacak şekilde kuruluyor ve çökerse yeniden başlatılması ayarlanıyor. Yönetici izni gerekirse UAC ile kendini yeniden başlatıyor.
-- Loglar `%ProgramData%\WolCatcher\wolcatcher.log` dosyasına yazılıyor, dosya 5 MB'ı geçince `.1` olarak yedekleniyor. Servisin başlama, durma ve hata kayıtları Olay Görüntüleyici'de de görünüyor.
+- Loglar `%ProgramData%\WolCatcher\wolcatcher.log` dosyasına yazılıyor, dosya 5 MB'ı geçince `.1` olarak yedekleniyor. Servisin başlama, durma ve hata kayıtları Olay Görüntüleyici'de de görünüyor. Kapatma başarısız olursa hata loglanıyor ve sonraki paket yeniden değerlendiriliyor.
 
 ## Derleme ve kurulum
 
@@ -77,15 +77,21 @@ Açma tarafının çalışması için BIOS/UEFI ve ağ kartı ayarlarında Wake-
 - `Force`: kapatırken açık uygulamaları zorla kapatır, kaydedilmemiş işler kaybolabilir.
 - `ActionDelaySeconds`: işlemden önce beklenecek süre.
 
-Ayarlar ortam değişkenleriyle de değiştirilebiliyor, örneğin `WolCatcher__Action=Sleep`.
+Ayarlar ortam değişkenleriyle de değiştirilebiliyor, örneğin `WolCatcher__Action=Sleep`. `Logging:LogLevel:Default` değeri `Debug` yapılırsa yakalanan her magic packet de loga yazılıyor.
+
+## Testler
+
+```powershell
+dotnet test tests/WolCatcher.Tests
+```
+
+Magic packet ayrıştırması, tetikleme kararı (başlangıç toleransı, uykudan uyanma, başarısız işlemden sonra yeniden deneme, bekleme süresi) ve dosya logu için birim testleri var. Tetikleme kararı `TriggerGate` sınıfında ve saati dışarıdan aldığı için zamana bağlı senaryolar beklemeden test edilebiliyor. Her push'ta GitHub Actions derleme ve testleri Windows üzerinde çalıştırıyor.
 
 ## Bilinen sorunlar
 
-- Bilgisayar WoL ile uykudan uyandırıldığında tolerans süresi işlemiyor, çünkü süre sadece servis başladığında sayılıyor. Telefonun gönderdiği tekrar paketleri bilgisayarı hemen tekrar kapatmaya çalışabiliyor.
-- İşlem başarısız olursa tetikleme kilidi sıfırlanmıyor ve servis yeniden başlayana kadar yeni paketler yok sayılıyor. Aynı sebeple `Sleep` ve `Hibernate` servis çalıştığı sürece yalnızca bir kez çalışıyor.
 - Kimlik doğrulama yok. Aynı ağda bu bilgisayarın MAC adresine magic packet gönderen herhangi bir cihaz onu kapatabilir.
-- Dosyaya sadece `Information` ve üstü seviyedeki loglar yazılıyor.
-- Sadece Windows'ta çalışıyor, otomatik test yok.
+- Uyanma, saatteki sıçramadan anlaşıldığı için saat elle ileri alınırsa da tolerans süresi yeniden başlıyor. Bu durumda 45 saniye boyunca paketler yok sayılıyor, başka bir etkisi yok.
+- Sadece Windows'ta çalışıyor.
 
 ## Lisans
 
