@@ -12,7 +12,10 @@ public sealed class FileLoggerProvider : ILoggerProvider
     private const long MaxBytes = 5 * 1024 * 1024;
     private readonly string _path;
     private readonly object _lock = new();
-    private bool _fileCreated = false;
+
+    // Dosya yeni ya da boşken başına BOM yazılır (Not Defteri Türkçe karakterleri doğru
+    // göstersin diye); dolu bir dosyaya eklerken StreamWriter BOM yazmaz.
+    private static readonly Encoding Utf8WithBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
 
     public FileLoggerProvider(string path)
     {
@@ -31,27 +34,13 @@ public sealed class FileLoggerProvider : ILoggerProvider
             try
             {
                 var info = new FileInfo(_path);
-                
-                // If file doesn't exist, create it with UTF-8 BOM
-                if (!_fileCreated)
-                {
-                    if (!info.Exists)
-                    {
-                        File.AppendAllText(_path, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-                    }
-                    _fileCreated = true;
-                }
-                
-                // Handle log rotation
                 if (info.Exists && info.Length > MaxBytes)
                 {
                     var backup = _path + ".1";
                     File.Delete(backup);
                     File.Move(_path, backup);
                 }
-                
-                // Append using UTF-8 without BOM to avoid corrupting the file
-                File.AppendAllText(_path, line + Environment.NewLine, Encoding.UTF8);
+                File.AppendAllText(_path, line + Environment.NewLine, Utf8WithBom);
             }
             catch { /* günlükleme hataları sessizce yutulur */ }
         }
@@ -61,7 +50,8 @@ public sealed class FileLoggerProvider : ILoggerProvider
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
-        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
+        // Hangi seviyelerin yazılacağına appsettings.json içindeki Logging bölümü karar verir.
+        public bool IsEnabled(LogLevel logLevel) => logLevel != LogLevel.None;
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
             Exception? exception, Func<TState, Exception?, string> formatter)
