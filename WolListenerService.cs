@@ -18,6 +18,9 @@ public sealed class WolListenerService : BackgroundService
     private List<byte[]> _targetMacs = new();
     private TriggerGate _gate = null!;
 
+    // Uykudan uyanmayı yakalamak için saatin gözlemlenme aralığı.
+    private static readonly TimeSpan ClockCheckInterval = TimeSpan.FromSeconds(5);
+
     public WolListenerService(ILogger<WolListenerService> logger, IOptions<WolCatcherOptions> options)
     {
         _logger = logger;
@@ -44,7 +47,7 @@ public sealed class WolListenerService : BackgroundService
         }
 
         var ports = (_options.Ports is { Length: > 0 }) ? _options.Ports : new[] { 9, 7 };
-        var tasks = new List<Task>();
+        var tasks = new List<Task> { WatchForResumeAsync(stoppingToken) };
         foreach (var port in ports.Distinct())
             tasks.Add(ListenOnPortAsync(port, stoppingToken));
 
@@ -57,6 +60,24 @@ public sealed class WolListenerService : BackgroundService
             // Servis durduruluyor; normal.
         }
     }
+
+    /// <summary>
+    /// Bilgisayar uyurken bu döngü durur. Uyanınca saatte büyük bir sıçrama görülür ve
+    /// başlangıç toleransı yeniden başlar; böylece WoL ile uyandırırken telefonun gönderdiği
+    /// tekrar paketleri bilgisayarı hemen kapatmaz.
+    /// </summary>
+    private async Task WatchForResumeAsync(CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(ClockCheckInterval);
+        while (await timer.WaitForNextTickAsync(token))
+        {
+            if (_gate.ObserveClock(DateTime.UtcNow))
+                LogResume();
+        }
+    }
+
+    private void LogResume() =>
+        _logger.LogInformation("Uykudan uyanma algılandı, {Grace} sn boyunca gelen paketler yok sayılacak.", _options.StartupGraceSeconds);
 
     private async Task ListenOnPortAsync(int port, CancellationToken token)
     {
@@ -114,11 +135,14 @@ public sealed class WolListenerService : BackgroundService
             return;
 
         var result = _gate.Evaluate(DateTime.UtcNow);
+        if (result.ResumeDetected)
+            LogResume();
+
         switch (result.Decision)
         {
             case GateDecision.GracePeriod:
-                // WoL ile açılırken gelen tekrarlı paketlerin makineyi hemen kapatmasını önler.
-                _logger.LogInformation("Magic packet yakalandı ({Mac}) ama başlangıç toleransı içinde ({Elapsed:F0}/{Grace} sn), yok sayıldı.",
+                // WoL ile açılırken ya da uyanırken gelen tekrarlı paketlerin makineyi hemen kapatmasını önler.
+                _logger.LogInformation("Magic packet yakalandı ({Mac}) ama tolerans süresi içinde ({Elapsed:F0}/{Grace} sn), yok sayıldı.",
                     MagicPacket.Format(mac), result.SinceGraceStart.TotalSeconds, _options.StartupGraceSeconds);
                 return;
             case GateDecision.AlreadyRunning:
